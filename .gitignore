@@ -1,0 +1,24 @@
+# 환경변수 / 인증
+.env
+token.json
+client_secrets.json
+client_secrets_bak.json
+
+# 데이터 / 출력
+data/
+output/
+assets/
+
+# 로그 / PID
+*.log
+pipeline.pid
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# 기타
+nul

@@ -3,6 +3,9 @@ cd "$(dirname "$0")"
 
 echo "[US Market Pipeline] 시작 중..."
 
+# 가상환경 활성화
+source venv/bin/activate
+
 if [ -f pipeline.pid ]; then
     PROC_PID=$(cat pipeline.pid)
     if kill -0 "$PROC_PID" 2>/dev/null; then

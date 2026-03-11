@@ -4,7 +4,7 @@
 
 cd "$(dirname "$0")"
 
-# 가상환경 사용 시 활성화 (없으면 주석 처리)
-# source venv/bin/activate
+# 가상환경 활성화
+source venv/bin/activate
 
 PYTHONIOENCODING=utf-8 python main.py >> pipeline.log 2>> pipeline_error.log

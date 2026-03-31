@@ -119,6 +119,21 @@ def _make_audio(script: str, out_path: str):
                 os.remove(f)
 
 
+def _fetch_web_image(query: str) -> str | None:
+    """DuckDuckGo 이미지 검색으로 관련 이미지 URL을 반환합니다."""
+    try:
+        from ddgs import DDGS
+        with DDGS() as ddgs:
+            results = list(ddgs.images(query, max_results=5, type_image="photo"))
+            for r in results:
+                url = r.get("image", "")
+                if url and url.startswith("http"):
+                    return url
+    except Exception as e:
+        print(f"  [!!] 웹 이미지 검색 실패: {e}")
+    return None
+
+
 def _load_background(image_url: str | None) -> Image.Image:
     bg = Image.new("RGB", (W, H), BG_COLOR)
     if not image_url:
@@ -220,8 +235,7 @@ def _chart_y_offset(tickers: list) -> int:
 
 def create_video(headline_kr: str, analysis: dict,
                  image_url: str | None = None,
-                 article_url: str | None = None,
-                 full_text_kr: str | None = None) -> str:
+                 article_url: str | None = None) -> str:
     os.makedirs(VIDEO_OUTPUT_DIR, exist_ok=True)
     os.makedirs(ASSETS_DIR, exist_ok=True)
 
@@ -231,12 +245,24 @@ def create_video(headline_kr: str, analysis: dict,
     reason        = analysis.get("reason", "")
     tickers       = analysis.get("tickers", [])
 
-    # 기사 전문(번역) 또는 Groq 스크립트를 TTS 본문으로 사용
-    if full_text_kr:
-        raw_script = full_text_kr
-    else:
-        raw_script = analysis.get("script", headline_kr)
+    # Groq가 생성한 기승전결 나레이션을 TTS 본문으로 사용
+    raw_script = analysis.get("narration") or analysis.get("script", headline_kr)
     raw_script = _clean_script(raw_script)
+
+    # 이미지가 없으면 DuckDuckGo 웹 검색으로 보완
+    if not image_url:
+        if companies_en:
+            query = f"{companies_en[0]} stock market finance"
+        elif tickers:
+            query = f"{tickers[0]} stock market"
+        else:
+            query = "US stock market finance news"
+        print(f"  [>>] 이미지 없음, 웹 검색 중: {query}")
+        image_url = _fetch_web_image(query)
+        if image_url:
+            print(f"  [OK] 웹 이미지 획득")
+        else:
+            print(f"  [--] 웹 이미지 없음, 다크 배경 사용")
 
     # 한국어 회사명 → 영문으로 치환 (TTS 영어 발음)
     for ko, en in zip(companies, companies_en):

@@ -17,7 +17,7 @@ from datetime import datetime, timezone, timedelta
 from config import NEWS_CATEGORY, YOUTUBE_MIN_IMPORTANCE, ARTICLE_DELAY_SECONDS
 from modules.news_collector import fetch_new_articles, mark_as_processed
 from modules.translator import translate_to_korean
-from modules.analyzer import analyze_article
+from modules.analyzer import analyze_article, generate_narration
 from modules.article_scraper import fetch_article_body
 from modules.video_maker import create_video
 from modules.uploader import build_metadata, upload_video
@@ -49,29 +49,31 @@ def process_article(article: dict):
 
     print(f"\n[Pipeline] 처리 중: {headline_en[:80]}...")
 
-    # 1. 번역 (헤드라인 + 전체 기사 본문)
+    # 1. 번역 (헤드라인만 번역, 본문은 Groq가 직접 읽어 나레이션 생성)
     headline_kr = translate_to_korean(headline_en)
     print(f"  [OK] 번역: {headline_kr[:60]}...")
 
     body_en = fetch_article_body(article_url)
-    full_text_kr = translate_to_korean(body_en) if body_en else None
-    if full_text_kr:
-        print(f"  [OK] 본문 번역: {len(full_text_kr)}자")
+    if body_en:
+        print(f"  [OK] 본문 수집: {len(body_en)}자")
 
-    # 2. 분석
-    analysis = analyze_article(headline_en, summary_en)
+    # 2. 분석 + 나레이션 생성 (Groq가 기사 본문 기반으로 3000자 기승전결 나레이션 작성)
+    analysis = analyze_article(headline_en, summary_en, body=body_en or "")
     score = analysis.get("importance_score", 5)
     tickers = analysis.get("tickers", [])
     ticker_str = ", ".join(tickers) if tickers else "시장 전반"
     print(f"  [OK] 분석: 종목={ticker_str}, 영향={analysis.get('impact')}, 중요도={score}/10")
 
-    # 3. YouTube: 중요도 기준 이상일 때만 영상 제작 + 업로드
+    # 3. YouTube: 중요도 기준 이상일 때만 나레이션 생성 + 영상 제작 + 업로드
     if score >= YOUTUBE_MIN_IMPORTANCE:
-        print(f"  [>>] 중요도 {score} >= {YOUTUBE_MIN_IMPORTANCE}: 영상 제작 시작")
+        print(f"  [>>] 중요도 {score} >= {YOUTUBE_MIN_IMPORTANCE}: 나레이션 생성 중...")
+        narration = generate_narration(headline_en, summary_en, body_en or "", analysis)
+        analysis["narration"] = narration
+        print(f"  [OK] 나레이션: {len(narration)}자")
+        print(f"  [>>] 영상 제작 시작")
         video_path = create_video(headline_kr, analysis,
                                    image_url=image_url,
-                                   article_url=article_url,
-                                   full_text_kr=full_text_kr)
+                                   article_url=article_url)
         print(f"  [OK] 영상: {video_path}")
 
         title, description, tags = build_metadata(headline_kr, analysis, article_url=article_url)

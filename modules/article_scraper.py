@@ -12,7 +12,7 @@ try:
 except ImportError:
     _HAS_TRAFILATURA = False
 
-_MAX_CHARS = 2000
+_MAX_CHARS = 4000
 _HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
 

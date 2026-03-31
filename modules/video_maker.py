@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import textwrap
+import time
 from datetime import datetime
 
 import requests as req
@@ -79,29 +80,31 @@ def _make_silence(duration: float, out_path: str):
     cmd = [_FFMPEG, "-y", "-f", "lavfi", "-i",
            f"anullsrc=r=24000:cl=mono", "-t", str(duration),
            "-q:a", "9", "-acodec", "libmp3lame", out_path]
-    subprocess.run(cmd, check=True, capture_output=True)
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def _make_audio(script: str, out_path: str):
     """문장별 TTS 생성 후 0.5초 묵음 삽입하여 이어붙입니다."""
+    import shutil
     sentences = _split_sentences(script)
     if not sentences:
         sentences = [script]
 
-    tmp_dir   = os.path.dirname(out_path)
     tmp_files = []
-    silence_path = out_path.replace(".mp3", "_sil.mp3")
-    _make_silence(0.5, silence_path)
+    sil_idx = 0
 
     for i, sent in enumerate(sentences):
         tmp = out_path.replace(".mp3", f"_s{i}.mp3")
         gTTS(text=sent, lang="ko", slow=False).save(tmp)
         tmp_files.append(tmp)
         if i < len(sentences) - 1:
-            tmp_files.append(silence_path)
+            # 묵음 파일을 매번 고유 이름으로 생성 (ffmpeg 중복 입력 방지)
+            sil_path = out_path.replace(".mp3", f"_sil{sil_idx}.mp3")
+            _make_silence(0.5, sil_path)
+            tmp_files.append(sil_path)
+            sil_idx += 1
 
     if len(tmp_files) == 1:
-        import shutil
         shutil.copy(tmp_files[0], out_path)
     else:
         inputs = []
@@ -113,13 +116,11 @@ def _make_audio(script: str, out_path: str):
         cmd = [_FFMPEG, "-y"] + inputs + [
             "-filter_complex", filter_str, "-map", "[out]", out_path
         ]
-        subprocess.run(cmd, check=True, capture_output=True)
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     for f in tmp_files:
-        if f != silence_path and os.path.exists(f):
+        if os.path.exists(f):
             os.remove(f)
-    if os.path.exists(silence_path):
-        os.remove(silence_path)
 
 
 def _load_background(image_url: str | None) -> Image.Image:
@@ -139,7 +140,7 @@ def _load_background(image_url: str | None) -> Image.Image:
         overlay  = Image.new("RGBA", (W, H), (0, 0, 20, 210))
         bg = Image.alpha_composite(news_img.convert("RGBA"), overlay).convert("RGB")
     except Exception as e:
-        print(f"  ⚠ 배경 이미지 로드 실패: {e}")
+        print(f"  [!!] 배경 이미지 로드 실패: {e}")
     return bg
 
 
@@ -263,7 +264,7 @@ def create_video(headline_kr: str, analysis: dict,
     # 오디오 길이 측정
     result = subprocess.run(
         [_FFMPEG, "-i", audio_path],
-        capture_output=True, text=True
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
     )
     duration = 10.0  # fallback
     for line in result.stderr.splitlines():
@@ -320,9 +321,10 @@ def create_video(headline_kr: str, analysis: dict,
         "-shortest",
         output_path,
     ]
-    subprocess.run(cmd, check=True, capture_output=True)
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    # 임시 파일 정리
+    # 임시 파일 정리 (ffmpeg 프로세스가 파일 점유 해제할 시간 확보)
+    time.sleep(1)
     for p in frame_paths:
         if os.path.exists(p):
             os.remove(p)

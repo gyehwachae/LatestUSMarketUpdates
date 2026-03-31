@@ -44,5 +44,5 @@ def fetch_article_body(url: str) -> str:
         return text[:_MAX_CHARS]
 
     except Exception as e:
-        print(f"  ⚠ 기사 본문 추출 실패: {e}")
+        print(f"  [!!] 기사 본문 추출 실패: {e}")
         return ""

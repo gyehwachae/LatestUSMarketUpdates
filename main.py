@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 메인 파이프라인:
-  모든 뉴스 -> 번역 -> Groq 분석 -> X 발행
-  importance_score >= YOUTUBE_MIN_IMPORTANCE -> 영상 제작 -> YouTube 업로드 -> X에 유튜브 링크 추가
+  모든 뉴스 -> 번역 -> Groq 분석
+  importance_score >= YOUTUBE_MIN_IMPORTANCE -> 영상 제작 -> YouTube 업로드
 
 폴링 간격 (KST 기준):
   06:00~10:00 -> 1분  (기상 후 핵심 시간)
@@ -21,7 +21,6 @@ from modules.analyzer import analyze_article
 from modules.article_scraper import fetch_article_body
 from modules.video_maker import create_video
 from modules.uploader import build_metadata, upload_video
-from modules.x_publisher import post_tweet
 
 KST = timezone(timedelta(hours=9))
 
@@ -66,8 +65,6 @@ def process_article(article: dict):
     ticker_str = ", ".join(tickers) if tickers else "시장 전반"
     print(f"  [OK] 분석: 종목={ticker_str}, 영향={analysis.get('impact')}, 중요도={score}/10")
 
-    youtube_url = None
-
     # 3. YouTube: 중요도 기준 이상일 때만 영상 제작 + 업로드
     if score >= YOUTUBE_MIN_IMPORTANCE:
         print(f"  [>>] 중요도 {score} >= {YOUTUBE_MIN_IMPORTANCE}: 영상 제작 시작")
@@ -80,15 +77,11 @@ def process_article(article: dict):
         title, description, tags = build_metadata(headline_kr, analysis, article_url=article_url)
         video_id = upload_video(video_path, title, description, tags)
         if video_id:
-            youtube_url = f"https://youtu.be/{video_id}"
-            print(f"  [OK] YouTube: {youtube_url}")
+            print(f"  [OK] YouTube: https://youtu.be/{video_id}")
         else:
             print("  [--] YouTube 업로드 건너뜀 (일일 한도)")
     else:
-        print(f"  [--] 중요도 {score} < {YOUTUBE_MIN_IMPORTANCE}: 영상 건너뜀, X만 발행")
-
-    # 4. X 발행
-    post_tweet(analysis, youtube_url=youtube_url)
+        print(f"  [--] 중요도 {score} < {YOUTUBE_MIN_IMPORTANCE}: 영상 건너뜀")
 
 
 def run_once():

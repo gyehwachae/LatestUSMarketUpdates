@@ -53,7 +53,7 @@ def analyze_article(headline: str, summary: str) -> dict:
             if attempt == _MAX_RETRIES:
                 raise RuntimeError(f"Groq 한도 초과: {r.text[:200]}")
             wait = 30 * attempt
-            print(f"  ⚠ Groq 한도, {wait}초 대기 후 재시도 ({attempt}/{_MAX_RETRIES})...")
+            print(f"  [!!] Groq 한도, {wait}초 대기 후 재시도 ({attempt}/{_MAX_RETRIES})...")
             time.sleep(wait)
         else:
             raise RuntimeError(f"Groq API 오류 {r.status_code}: {r.text[:200]}")

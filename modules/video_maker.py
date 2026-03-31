@@ -5,6 +5,7 @@ Pillow + ffmpeg + gTTS로 뉴스 쇼츠 영상을 자동 생성합니다.
 - 문장 사이 0.5초 묵음 삽입
 해상도: 1080x1920 (YouTube Shorts 세로형)
 """
+import asyncio
 import io
 import os
 import re
@@ -13,8 +14,8 @@ import textwrap
 import time
 from datetime import datetime
 
+import edge_tts
 import requests as req
-from gtts import gTTS
 from moviepy.config import get_setting
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
@@ -32,6 +33,8 @@ _FFMPEG    = get_setting("FFMPEG_BINARY")
 _FONT_DIR  = os.path.join(ASSETS_DIR, "fonts")
 _FONT_REG  = os.path.join(_FONT_DIR, "Pretendard-Regular.otf")
 _FONT_BOLD = os.path.join(_FONT_DIR, "Pretendard-Bold.otf")
+
+_VOICE = "ko-KR-SunHiNeural"  # Microsoft Azure TTS 한국어 여성 음성
 
 _PRETENDARD_URLS = {
     "Pretendard-Regular.otf": "https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/packages/pretendard/dist/public/static/Pretendard-Regular.otf",
@@ -69,58 +72,51 @@ def _clean_script(text: str) -> str:
     return text.strip()
 
 
-def _split_sentences(text: str) -> list[str]:
-    """마침표/느낌표/물음표 기준으로 문장 분리"""
-    parts = re.split(r"(?<=[.!?。])\s+", text.strip())
-    return [p.strip() for p in parts if p.strip()]
 
-
-def _make_silence(duration: float, out_path: str):
-    """duration초짜리 무음 mp3 생성"""
-    cmd = [_FFMPEG, "-y", "-f", "lavfi", "-i",
-           f"anullsrc=r=24000:cl=mono", "-t", str(duration),
-           "-q:a", "9", "-acodec", "libmp3lame", out_path]
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+async def _tts_async(script: str, out_path: str):
+    communicate = edge_tts.Communicate(script, _VOICE)
+    await communicate.save(out_path)
 
 
 def _make_audio(script: str, out_path: str):
-    """문장별 TTS 생성 후 0.5초 묵음 삽입하여 이어붙입니다."""
-    import shutil
-    sentences = _split_sentences(script)
-    if not sentences:
-        sentences = [script]
-
-    tmp_files = []
-    sil_idx = 0
-
-    for i, sent in enumerate(sentences):
-        tmp = out_path.replace(".mp3", f"_s{i}.mp3")
-        gTTS(text=sent, lang="ko", slow=False).save(tmp)
-        tmp_files.append(tmp)
-        if i < len(sentences) - 1:
-            # 묵음 파일을 매번 고유 이름으로 생성 (ffmpeg 중복 입력 방지)
-            sil_path = out_path.replace(".mp3", f"_sil{sil_idx}.mp3")
-            _make_silence(0.5, sil_path)
-            tmp_files.append(sil_path)
-            sil_idx += 1
-
-    if len(tmp_files) == 1:
-        shutil.copy(tmp_files[0], out_path)
-    else:
-        inputs = []
+    """edge-tts (Microsoft Azure)로 고품질 한국어 음성을 생성합니다.
+    접속 실패 시 gTTS로 자동 폴백합니다."""
+    try:
+        asyncio.run(_tts_async(script, out_path))
+    except Exception as e:
+        print(f"  [!!] edge-tts 실패 ({e}), gTTS로 폴백합니다.")
+        from gtts import gTTS
+        import shutil
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?。])\s+", script.strip()) if s.strip()] or [script]
+        tmp_files, sil_idx = [], 0
+        for i, sent in enumerate(sentences):
+            tmp = out_path.replace(".mp3", f"_s{i}.mp3")
+            gTTS(text=sent, lang="ko", slow=False).save(tmp)
+            tmp_files.append(tmp)
+            if i < len(sentences) - 1:
+                sil = out_path.replace(".mp3", f"_sil{sil_idx}.mp3")
+                subprocess.run(
+                    [_FFMPEG, "-y", "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono",
+                     "-t", "0.5", "-q:a", "9", "-acodec", "libmp3lame", sil],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
+                )
+                tmp_files.append(sil)
+                sil_idx += 1
+        if len(tmp_files) == 1:
+            shutil.copy(tmp_files[0], out_path)
+        else:
+            inputs = []
+            for f in tmp_files:
+                inputs += ["-i", f]
+            n = len(tmp_files)
+            filter_str = "".join(f"[{i}:a]" for i in range(n)) + f"concat=n={n}:v=0:a=1[out]"
+            subprocess.run(
+                [_FFMPEG, "-y"] + inputs + ["-filter_complex", filter_str, "-map", "[out]", out_path],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
+            )
         for f in tmp_files:
-            inputs += ["-i", f]
-        n = len(tmp_files)
-        filter_str = "".join(f"[{i}:a]" for i in range(n))
-        filter_str += f"concat=n={n}:v=0:a=1[out]"
-        cmd = [_FFMPEG, "-y"] + inputs + [
-            "-filter_complex", filter_str, "-map", "[out]", out_path
-        ]
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    for f in tmp_files:
-        if os.path.exists(f):
-            os.remove(f)
+            if os.path.exists(f):
+                os.remove(f)
 
 
 def _load_background(image_url: str | None) -> Image.Image:
@@ -277,22 +273,19 @@ def create_video(headline_kr: str, analysis: dict,
     # 2. 배경 (뉴스 이미지 or 다크)
     bg = _load_background(image_url)
 
-    # 3. 차트 애니메이션 프레임 생성
-    FPS = 24
-    n_chart_frames = max(FPS * 2, FPS)  # 최소 2초 애니메이션
+    # 3. 차트 애니메이션 프레임 생성 (영상 전체 길이에 걸쳐 애니메이션)
+    FPS = 30
+    total_frames = int(duration * FPS)
     bar_color = IMPACT_COLORS.get(impact, IMPACT_COLORS["중립"])
-    chart_frames = generate_chart_frames(tickers, n_chart_frames, bar_color, W_CHART, H_CHART)
+    chart_frames = generate_chart_frames(tickers, total_frames, bar_color, W_CHART, H_CHART)
 
     chart_y = _chart_y_offset(tickers)
     frames_dir = os.path.join(ASSETS_DIR, "frames")
     os.makedirs(frames_dir, exist_ok=True)
-
-    total_frames = int(duration * FPS)
     frame_paths  = []
 
     for fi in range(total_frames):
-        # 2초 동안 차트 애니메이션, 이후 마지막 프레임 유지
-        chart_idx = min(fi, n_chart_frames - 1)
+        chart_idx = min(fi, len(chart_frames) - 1)
         chart_img = chart_frames[chart_idx]
 
         frame = bg.copy()
@@ -316,7 +309,7 @@ def create_video(headline_kr: str, analysis: dict,
         "-framerate", str(FPS),
         "-i", os.path.join(frames_dir, "frame_%05d.png"),
         "-i", audio_path,
-        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-c:v", "libx264", "-crf", "18", "-preset", "slow", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "192k",
         "-shortest",
         output_path,

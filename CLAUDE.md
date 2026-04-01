@@ -4,56 +4,60 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-자동화된 미국 주식 시장 뉴스 → 한국어 X(트위터) + YouTube Shorts 동시 발행 파이프라인.
-Finnhub에서 최신 뉴스 수집 → DeepL 번역 → Gemini가 종목 추출·중요도 점수·X 트윗 문구 생성 → 모든 뉴스를 X에 발행, 중요도 7 이상만 영상 제작 후 YouTube 업로드.
-
-## Setup
-
-```bash
-pip install -r requirements.txt
-cp .env.example .env
-# .env에 API 키 입력 (아래 Key Constraints 참고)
-```
-
-YouTube 첫 실행 시 브라우저 OAuth 인증 → `token.json` 자동 저장됨.
+자동화된 미국 주식 시장 뉴스 → 한국어 YouTube Shorts 발행 파이프라인.
+Finnhub에서 최신 뉴스 수집 → 기사 본문 스크래핑 → DeepL 헤드라인 번역 → Groq(Llama 3.3 70B)가 종목 추출·중요도 점수·기승전결 나레이션 생성 → 중요도 7 이상만 영상 제작 후 YouTube 업로드.
 
 ## Commands
 
 ```bash
-python main.py         # 1회 실행
-python main.py --loop  # 5분마다 자동 반복
+# 개발/테스트
+python main.py              # 1회 실행 (최대 5건 처리)
+python test_pipeline.py     # 파이프라인 전체 테스트 (영상 제작 + 업로드 포함)
+
+# 프로덕션 (백그라운드 데몬)
+./start.sh                  # 루프 모드 시작 (KST 시간대별 자동 폴링 간격)
+./stop.sh                   # 중지
+./restart.sh                # 재시작
+
+# 크론 1회 실행 (crontab용)
+./cron_run.sh               # venv 활성화 + 로그 기록
 ```
 
 ## Architecture
 
+파이프라인 흐름:
 ```
-main.py                  # 오케스트레이터: 모든 뉴스→X 발행, 고중요도→YouTube
-config.py                # 환경변수 및 상수
-modules/
-  news_collector.py      # Finnhub market-news 폴링, 중복 제거 (data/processed_news.json)
-  translator.py          # DeepL Free API
-  analyzer.py            # Gemini 1.5 Flash → {tickers, companies, summary, impact, reason,
-                         #   importance_score(1~10), script, x_post}
-  video_maker.py         # gTTS + MoviePy + Pillow → 1080x1920 mp4
-  uploader.py            # YouTube Data API v3, 일일 카운터 (data/upload_count.json)
-  x_publisher.py         # Tweepy v2 → X(트위터) 발행, YouTube URL 첨부 가능
-output/videos/           # 생성된 영상
-data/                    # processed_news.json, upload_count.json
-assets/                  # 임시 이미지/오디오 (처리 후 자동 삭제)
+Finnhub API → article_scraper(본문추출) → translator(DeepL) → analyzer(Groq)
+                                                                    ↓
+                                           ← video_maker ← generate_narration
+                                                    ↓
+                                               uploader(YouTube)
 ```
+
+핵심 모듈:
+- `main.py`: 오케스트레이터. KST 시간대별 폴링 간격 자동 조절 (아침 1분, 정규장 10분, 낮 30분)
+- `modules/analyzer.py`: Groq REST API 직접 호출. 분석 JSON + 기승전결 3000자 나레이션 2회 호출로 생성
+- `modules/video_maker.py`: edge-tts 문장별 TTS → 자막 타이밍 추출 → Pillow 프레임 렌더링 → ffmpeg 인코딩
+- `modules/chart_maker.py`: yfinance로 5일 1시간봉 → Pillow로 차트 애니메이션 프레임 생성
+- `modules/article_scraper.py`: trafilatura(1차) → BeautifulSoup(fallback)으로 기사 본문 추출
+
+데이터 파일:
+- `data/processed_news.json`: 처리 완료된 기사 ID 목록 (중복 방지)
+- `data/upload_count.json`: 일일 YouTube 업로드 카운터
+- `token.json`: YouTube OAuth 토큰 (첫 실행 시 브라우저 인증 필요)
 
 ## Key Constraints
 
 | 서비스 | 한도 | 설정값 |
 |--------|------|--------|
-| YouTube API | 하루 10,000 유닛 (업로드 1건 ≈ 1,600유닛 → 최대 6건) | `MAX_YOUTUBE_UPLOADS_PER_DAY=6` |
-| YouTube 업로드 조건 | Gemini `importance_score` ≥ 기준값 | `YOUTUBE_MIN_IMPORTANCE=7` (기본) |
-| X Free Tier | 월 1,500 트윗 (하루 약 50건) | 트윗 280자 이내 자동 truncate |
-| DeepL Free | 월 50만 자 | — |
-| Gemini 응답 | 반드시 JSON | `analyzer.py`에서 ```json 블록 파싱 처리 포함 |
+| Groq API | 하루 14,400회 (무료) | 429 시 30초씩 대기 후 최대 3회 재시도 |
+| YouTube API | 하루 10,000 유닛 (업로드 1건 ≈ 1,600유닛) | `MAX_YOUTUBE_UPLOADS_PER_DAY=6` |
+| YouTube 업로드 조건 | `importance_score` ≥ 기준값 | `YOUTUBE_MIN_IMPORTANCE=7` (기본) |
+| DeepL Free | 월 50만 자 | 헤드라인만 번역 (본문은 Groq가 직접 처리) |
 | 뉴스 수집 | 한 번에 최대 5건 | API 쿼터 보호 |
+| 기사 본문 | 최대 4,000자 | `article_scraper.py`에서 truncate |
 
-## importance_score 기준 (Gemini 판단)
+## importance_score 기준
 
 - 9~10: Fed/금리/CPI 등 매크로 지표
 - 8~9: 어닝서프라이즈 / 가이던스 상·하향
@@ -61,6 +65,8 @@ assets/                  # 임시 이미지/오디오 (처리 후 자동 삭제)
 - 6~7: 경영진 교체 / 소송
 - 1~5: 일반 분석 / 의견 기사
 
-## News Category
+## Environment Variables
 
-`.env`의 `NEWS_CATEGORY`: `general` | `forex` | `crypto` | `merger`
+`.env` 필수 키: `FINNHUB_API_KEY`, `DEEPL_API_KEY`, `GROQ_API_KEY`
+YouTube: `client_secrets.json` 파일 필요 (Google Cloud Console에서 OAuth 2.0 클라이언트 생성)
+선택: `NEWS_CATEGORY` (`general` | `forex` | `crypto` | `merger`), `YOUTUBE_MIN_IMPORTANCE`

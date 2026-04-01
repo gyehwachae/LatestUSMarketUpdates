@@ -18,7 +18,7 @@ from config import NEWS_CATEGORY, YOUTUBE_MIN_IMPORTANCE, ARTICLE_DELAY_SECONDS
 from modules.news_collector import fetch_new_articles, mark_as_processed
 from modules.translator import translate_to_korean
 from modules.analyzer import analyze_article, generate_narration
-from modules.article_scraper import fetch_article_body
+from modules.article_scraper import fetch_article_with_image
 from modules.video_maker import create_video
 from modules.uploader import build_metadata, upload_video
 
@@ -53,9 +53,14 @@ def process_article(article: dict):
     headline_kr = translate_to_korean(headline_en)
     print(f"  [OK] 번역: {headline_kr[:60]}...")
 
-    body_en = fetch_article_body(article_url)
+    body_en, scraped_image = fetch_article_with_image(article_url)
     if body_en:
         print(f"  [OK] 본문 수집: {len(body_en)}자")
+
+    # Finnhub 이미지가 없으면 스크래핑한 이미지 사용
+    if not image_url and scraped_image:
+        image_url = scraped_image
+        print(f"  [OK] 기사 이미지 추출: {image_url[:60]}...")
 
     # 2. 분석 + 나레이션 생성 (Groq가 기사 본문 기반으로 3000자 기승전결 나레이션 작성)
     analysis = analyze_article(headline_en, summary_en, body=body_en or "")

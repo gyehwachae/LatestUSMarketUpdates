@@ -42,14 +42,22 @@ def _get_credentials() -> Credentials:
         creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+            try:
+                creds.refresh(Request())
+            except Exception as e:
+                print(f"[Uploader] 인증 갱신 실패: {e}")
+                return None
         else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                YOUTUBE_CLIENT_SECRETS_FILE, SCOPES
-            )
-            creds = flow.run_local_server(port=0)
-        with open(TOKEN_FILE, "w") as f:
-            f.write(creds.to_json())
+            try:
+                flow = InstalledAppFlow.from_client_secrets_file(YOUTUBE_CLIENT_SECRETS_FILE, SCOPES)
+                creds = flow.run_console()
+            except Exception as e:
+                print(f"[Uploader] 인증 실패 (OAuth): {e}")
+                return None
+        
+        if creds:
+            with open(TOKEN_FILE, "w") as f:
+                f.write(creds.to_json())
     return creds
 
 
@@ -64,6 +72,10 @@ def upload_video(video_path: str, title: str, description: str, tags: list[str])
         return None
 
     creds = _get_credentials()
+    if not creds:
+        print("[Uploader] 유효한 인증 정보가 없습니다. 업로드를 건너뜁니다.")
+        return None
+    
     youtube = build("youtube", "v3", credentials=creds)
 
     body = {

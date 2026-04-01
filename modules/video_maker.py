@@ -167,7 +167,7 @@ def _make_audio_with_timing(script: str, out_path: str) -> list[tuple[str, float
 def _fetch_web_image(query: str) -> str | None:
     """DuckDuckGo 이미지 검색으로 관련 이미지 URL을 반환합니다."""
     try:
-        from ddgs import DDGS
+        from duckduckgo_search import DDGS
         with DDGS() as ddgs:
             results = list(ddgs.images(query, max_results=5, type_image="photo"))
             for r in results:

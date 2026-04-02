@@ -8,6 +8,9 @@ DEEPL_API_KEY = os.getenv("DEEPL_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 YOUTUBE_CLIENT_SECRETS_FILE = os.getenv("YOUTUBE_CLIENT_SECRETS_FILE", "client_secrets.json")
 
+# Pexels API - pexels.com/api (무료, 월 20,000회)
+PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
+
 # X (Twitter) API v2 - developer.twitter.com
 X_API_KEY = os.getenv("X_API_KEY")
 X_API_SECRET = os.getenv("X_API_SECRET")

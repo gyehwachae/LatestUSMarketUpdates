@@ -15,8 +15,8 @@ load_dotenv()
 
 from modules.news_collector import fetch_new_articles, mark_as_processed
 from modules.translator import translate_to_korean
-from modules.analyzer import analyze_article
-from modules.article_scraper import fetch_article_body
+from modules.analyzer import analyze_article, generate_narration
+from modules.article_scraper import fetch_article_with_image
 from modules.video_maker import create_video
 from modules.uploader import build_metadata, upload_video
 from config import ARTICLE_DELAY_SECONDS, YOUTUBE_MIN_IMPORTANCE
@@ -44,21 +44,23 @@ for idx, article in enumerate(articles, 1):
     print("=" * 60)
 
     try:
-        # 1. 번역
+        # 1. 번역 + 본문 수집
         headline_kr = translate_to_korean(headline_en)
         print(f"헤드라인(한): {headline_kr}")
 
-        body_en = fetch_article_body(article_url)
+        body_en, scraped_image = fetch_article_with_image(article_url)
         if body_en:
             print(f"본문 추출: {len(body_en)}자 (영문)")
-            full_text_kr = translate_to_korean(body_en)
-            print(f"본문 번역: {len(full_text_kr)}자 (한글)")
         else:
             print("본문 추출 실패 - Groq 스크립트로 대체")
-            full_text_kr = None
+
+        # Finnhub 이미지가 없으면 스크래핑한 이미지 사용
+        if not image_url and scraped_image:
+            image_url = scraped_image
+            print(f"기사 이미지 추출: {image_url[:60]}...")
 
         # 2. 분석
-        analysis = analyze_article(headline_en, summary_en)
+        analysis = analyze_article(headline_en, summary_en, body=body_en or "")
         score = analysis.get("importance_score", 5)
         tickers = analysis.get("tickers", [])
         print(f"종목: {', '.join(tickers) or '시장 전반'}  |  영향: {analysis.get('impact')}  |  중요도: {score}/10")
@@ -67,11 +69,18 @@ for idx, article in enumerate(articles, 1):
         # 3. 영상 제작 + YouTube 업로드
         youtube_url = None
         if score >= YOUTUBE_MIN_IMPORTANCE:
-            print(f"중요도 {score} >= {YOUTUBE_MIN_IMPORTANCE}: 영상 제작")
+            print(f"중요도 {score} >= {YOUTUBE_MIN_IMPORTANCE}: 나레이션 생성 중...")
+            narration = generate_narration(headline_en, summary_en, body_en or "", analysis)
+            analysis["narration"] = narration
+            print(f"나레이션: {len(narration)}자")
+            print(f"--- 나레이션 내용 ---")
+            print(narration)
+            print(f"--- 나레이션 끝 ---")
+
+            print(f"영상 제작 중...")
             video_path = create_video(headline_kr, analysis,
                                       image_url=image_url,
-                                      article_url=article_url,
-                                      full_text_kr=full_text_kr)
+                                      article_url=article_url)
             print(f"영상 저장: {video_path}")
 
             title, description, tags = build_metadata(headline_kr, analysis, article_url=article_url)

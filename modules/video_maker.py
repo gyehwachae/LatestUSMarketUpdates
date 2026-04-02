@@ -1,12 +1,11 @@
 """
-Pillow + ffmpeg + edge-tts/gTTS로 뉴스 쇼츠 영상을 자동 생성합니다.
-- 문장별 TTS 생성 → 자막 타이밍 추출
-- 프레임마다 자막 텍스트 렌더링 (대본 동기화)
-- Pretendard 폰트 자동 다운로드
+뉴스 보고서 형식의 YouTube Shorts 영상 생성
+- 깔끔한 그라데이션 배경
+- 종목 + 영향 배지 + 헤드라인 + 핵심 포인트 레이아웃
+- 문장별 TTS + 자막 동기화
 해상도: 1080x1920 (YouTube Shorts 세로형)
 """
 import asyncio
-import io
 import os
 import re
 import shutil
@@ -18,29 +17,53 @@ from datetime import datetime
 import edge_tts
 import requests as req
 from moviepy.config import get_setting
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageFont
 
 from config import ASSETS_DIR, VIDEO_OUTPUT_DIR
 from modules.chart_maker import generate_chart_frames, W_CHART, H_CHART
 
 W, H = 1080, 1920
-BG_COLOR      = (10, 10, 30)
-TEXT_COLOR    = (255, 255, 255)
-SUBTITLE_BG   = (0, 0, 0, 200)
-IMPACT_COLORS = {"긍정": (0, 210, 100), "부정": (220, 60, 60), "중립": (160, 160, 160)}
-IMPACT_LABEL  = {"긍정": "매매의견 : 긍정", "부정": "매매의견 : 부정", "중립": "매매의견 : 중립"}
 
-_FFMPEG    = get_setting("FFMPEG_BINARY")
-_FONT_DIR  = os.path.join(ASSETS_DIR, "fonts")
-_FONT_REG  = os.path.join(_FONT_DIR, "Pretendard-Regular.otf")
+# 색상 팔레트
+COLORS = {
+    "긍정": {
+        "primary": (0, 200, 120),      # 메인 녹색
+        "bg_top": (10, 35, 30),        # 배경 상단
+        "bg_bottom": (5, 20, 25),      # 배경 하단
+        "badge": (0, 180, 100),        # 배지 색상
+        "accent": (100, 255, 180),     # 강조 색상
+    },
+    "부정": {
+        "primary": (230, 70, 70),      # 메인 빨강
+        "bg_top": (40, 15, 20),        # 배경 상단
+        "bg_bottom": (25, 10, 15),     # 배경 하단
+        "badge": (200, 60, 60),        # 배지 색상
+        "accent": (255, 120, 120),     # 강조 색상
+    },
+    "중립": {
+        "primary": (100, 150, 255),    # 메인 파랑
+        "bg_top": (15, 20, 40),        # 배경 상단
+        "bg_bottom": (10, 12, 30),     # 배경 하단
+        "badge": (80, 130, 220),       # 배지 색상
+        "accent": (150, 200, 255),     # 강조 색상
+    },
+}
+
+TEXT_WHITE = (255, 255, 255)
+TEXT_GRAY = (180, 180, 190)
+TEXT_DARK = (40, 40, 50)
+
+_FFMPEG = get_setting("FFMPEG_BINARY")
+_FONT_DIR = os.path.join(ASSETS_DIR, "fonts")
+_FONT_REG = os.path.join(_FONT_DIR, "Pretendard-Regular.otf")
 _FONT_BOLD = os.path.join(_FONT_DIR, "Pretendard-Bold.otf")
 
-_VOICE           = "ko-KR-SunHiNeural"
-_SILENCE_SEC     = 0.3   # 문장 사이 묵음 길이
+_VOICE = "ko-KR-SunHiNeural"
+_SILENCE_SEC = 0.3
 
 _PRETENDARD_URLS = {
     "Pretendard-Regular.otf": "https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/packages/pretendard/dist/public/static/Pretendard-Regular.otf",
-    "Pretendard-Bold.otf":    "https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/packages/pretendard/dist/public/static/Pretendard-Bold.otf",
+    "Pretendard-Bold.otf": "https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/packages/pretendard/dist/public/static/Pretendard-Bold.otf",
 }
 
 
@@ -77,6 +100,47 @@ def _clean_script(text: str) -> str:
     return text.strip()
 
 
+def _fix_number_josa(text: str) -> str:
+    """숫자 뒤 조사를 올바르게 교정합니다. (예: 3와 → 3과)"""
+    # 숫자별 받침 유무 (마지막 자리 기준)
+    # 받침 있음: 0(영), 1(일), 3(삼), 6(육), 7(칠), 8(팔)
+    # 받침 없음: 2(이), 4(사), 5(오), 9(구)
+    has_batchim = {'0', '1', '3', '6', '7', '8'}
+
+    # 조사 쌍: (받침 없을 때, 받침 있을 때)
+    josa_pairs = [
+        ('와', '과'),
+        ('는', '은'),
+        ('가', '이'),
+        ('를', '을'),
+        ('로', '으로'),
+        ('라', '이라'),
+        ('랑', '이랑'),
+    ]
+
+    for wrong_when_batchim, correct_when_batchim in josa_pairs:
+        # 패턴: 숫자 + 잘못된 조사
+        # 받침 있는 숫자 뒤에 받침 없는 조사가 온 경우 교정
+        pattern = rf'(\d)({re.escape(wrong_when_batchim)})(?=\s|$|[,.]|[가-힣])'
+        def replace_josa(m):
+            digit = m.group(1)
+            if digit in has_batchim:
+                return digit + correct_when_batchim
+            return m.group(0)
+        text = re.sub(pattern, replace_josa, text)
+
+        # 반대 케이스: 받침 없는 숫자 뒤에 받침 있는 조사가 온 경우
+        pattern2 = rf'(\d)({re.escape(correct_when_batchim)})(?=\s|$|[,.]|[가-힣])'
+        def replace_josa2(m):
+            digit = m.group(1)
+            if digit not in has_batchim:
+                return digit + wrong_when_batchim
+            return m.group(0)
+        text = re.sub(pattern2, replace_josa2, text)
+
+    return text
+
+
 def _split_sentences(text: str) -> list[str]:
     parts = re.split(r"(?<=[.!?。])\s+", text.strip())
     return [p.strip() for p in parts if p.strip()]
@@ -103,7 +167,7 @@ async def _tts_async(text: str, out_path: str):
 
 
 def _tts_sentence(text: str, out_path: str):
-    """단일 문장 TTS (edge-tts 우선, gTTS 폴백)"""
+    text = _fix_number_josa(text)  # 숫자 뒤 조사 교정
     try:
         asyncio.run(_tts_async(text, out_path))
     except Exception:
@@ -119,10 +183,6 @@ def _make_silence(duration: float, out_path: str):
 
 
 def _make_audio_with_timing(script: str, out_path: str) -> list[tuple[str, float, float]]:
-    """
-    문장별 TTS를 생성하고 합친 뒤 각 문장의 (텍스트, 시작초, 끝초)를 반환합니다.
-    이 타이밍으로 영상에 자막을 동기화합니다.
-    """
     sentences = _split_sentences(script) or [script]
     timings = []
     tmp_files = []
@@ -162,138 +222,168 @@ def _make_audio_with_timing(script: str, out_path: str) -> list[tuple[str, float
     return timings
 
 
-# ──────────────────────────── 이미지 검색 ────────────────────────────
+# ──────────────────────────── 그라데이션 배경 ────────────────────────────
 
-def _fetch_web_image(query: str) -> str | None:
-    """DuckDuckGo 이미지 검색으로 관련 이미지 URL을 반환합니다."""
-    try:
-        from duckduckgo_search import DDGS
-        with DDGS() as ddgs:
-            results = list(ddgs.images(query, max_results=5, type_image="photo"))
-            for r in results:
-                url = r.get("image", "")
-                if url and url.startswith("http"):
-                    return url
-    except Exception as e:
-        print(f"  [!!] 웹 이미지 검색 실패: {e}")
-    return None
+def _create_gradient_background(impact: str) -> Image.Image:
+    """영향(긍정/부정/중립)에 따른 그라데이션 배경 생성"""
+    colors = COLORS.get(impact, COLORS["중립"])
+    top = colors["bg_top"]
+    bottom = colors["bg_bottom"]
 
-
-def _load_background(image_url: str | None) -> Image.Image:
-    bg = Image.new("RGB", (W, H), BG_COLOR)
-    if not image_url:
-        return bg
-    try:
-        r = req.get(image_url, timeout=8)
-        r.raise_for_status()
-        news_img = Image.open(io.BytesIO(r.content)).convert("RGB")
-        ratio    = W / news_img.width
-        new_h    = max(int(news_img.height * ratio), H)
-        news_img = news_img.resize((W, new_h), Image.LANCZOS)
-        top      = (news_img.height - H) // 2
-        news_img = news_img.crop((0, top, W, top + H))
-        news_img = news_img.filter(ImageFilter.GaussianBlur(radius=12))
-        overlay  = Image.new("RGBA", (W, H), (0, 0, 20, 210))
-        bg = Image.alpha_composite(news_img.convert("RGBA"), overlay).convert("RGB")
-    except Exception as e:
-        print(f"  [!!] 배경 이미지 로드 실패: {e}")
-    return bg
-
-
-# ──────────────────────────── 오버레이 렌더링 ────────────────────────────
-
-def _draw_text_overlays(img: Image.Image, tickers: list, companies: list,
-                        companies_en: list, impact: str, headline_kr: str) -> Image.Image:
-    """정적 텍스트 패널(종목·매매의견·헤드라인)을 렌더링합니다."""
-    bar   = IMPACT_COLORS.get(impact, IMPACT_COLORS["중립"])
-    label = IMPACT_LABEL.get(impact, f"매매의견 : {impact}")
-    draw  = ImageDraw.Draw(img)
-
-    # 상단/하단 컬러 바
-    draw.rectangle([(0, 0),      (W, 14)], fill=bar)
-    draw.rectangle([(0, H - 14), (W, H)], fill=bar)
-
-    y = 30
-
-    # ── 종목 블록 ──
-    if tickers:
-        for i, ticker in enumerate(tickers[:3]):
-            en_name = companies_en[i] if i < len(companies_en) else ""
-            draw.text((44, y), f"${ticker}", font=_font(72, bold=True), fill=bar)
-            tw = int(_font(72, bold=True).getlength(f"${ticker}"))
-            if en_name:
-                draw.text((44 + tw + 24, y + 20), en_name, font=_font(34), fill=TEXT_COLOR)
-            y += 90
-    else:
-        draw.text((44, y), "US Market", font=_font(64, bold=True), fill=bar)
-        y += 90
-
-    # ── 매매의견 (종목이 있을 때만) ──
-    if tickers:
-        y += 8
-        op_bg = Image.new("RGBA", (W, 96), (0, 0, 0, 200))
-        img.paste(op_bg, (0, y), op_bg)
-        draw = ImageDraw.Draw(img)
-        draw.text((44, y + 12), label, font=_font(58, bold=True), fill=bar)
-        y += 110
-
-    # ── 차트 영역 (chart_maker가 채움) ──
-    y += H_CHART + 20
-
-    # ── 헤드라인 패널 ──
-    headline_lines = textwrap.wrap(headline_kr, width=19)[:3]
-    ph = len(headline_lines) * 74 + 32
-    panel = Image.new("RGBA", (W, ph), (0, 0, 0, 175))
-    img.paste(panel, (0, y), panel)
+    img = Image.new("RGB", (W, H))
     draw = ImageDraw.Draw(img)
-    y += 16
-    for line in headline_lines:
-        draw.text((44, y), line, font=_font(52, bold=True), fill=TEXT_COLOR)
-        y += 74
 
-    # 워터마크
-    ts = datetime.now().strftime("%Y.%m.%d %H:%M KST")
-    draw.text((44, H - 46), f"US Market Flash  |  {ts}",
-              font=_font(26), fill=(120, 120, 140))
+    for y in range(H):
+        ratio = y / H
+        r = int(top[0] + (bottom[0] - top[0]) * ratio)
+        g = int(top[1] + (bottom[1] - top[1]) * ratio)
+        b = int(top[2] + (bottom[2] - top[2]) * ratio)
+        draw.line([(0, y), (W, y)], fill=(r, g, b))
 
     return img
 
 
-def _draw_subtitle(img: Image.Image, text: str) -> Image.Image:
-    """현재 문장을 하단 자막으로 렌더링합니다."""
+def _draw_rounded_rect(draw: ImageDraw, xy: tuple, radius: int, fill: tuple):
+    """둥근 모서리 사각형 그리기"""
+    x1, y1, x2, y2 = xy
+    draw.rectangle([x1 + radius, y1, x2 - radius, y2], fill=fill)
+    draw.rectangle([x1, y1 + radius, x2, y2 - radius], fill=fill)
+    draw.ellipse([x1, y1, x1 + radius * 2, y1 + radius * 2], fill=fill)
+    draw.ellipse([x2 - radius * 2, y1, x2, y1 + radius * 2], fill=fill)
+    draw.ellipse([x1, y2 - radius * 2, x1 + radius * 2, y2], fill=fill)
+    draw.ellipse([x2 - radius * 2, y2 - radius * 2, x2, y2], fill=fill)
+
+
+# ──────────────────────────── 보고서 레이아웃 ────────────────────────────
+
+def _draw_report_layout(img: Image.Image, tickers: list, companies_en: list,
+                        impact: str, headline_kr: str, summary: str,
+                        chart_frame: Image.Image | None = None) -> Image.Image:
+    """뉴스 보고서 형식 레이아웃 렌더링"""
+    colors = COLORS.get(impact, COLORS["중립"])
+    primary = colors["primary"]
+    badge_color = colors["badge"]
+    accent = colors["accent"]
+
+    draw = ImageDraw.Draw(img)
+
+    # 상단/하단 컬러 바
+    draw.rectangle([(0, 0), (W, 8)], fill=primary)
+    draw.rectangle([(0, H - 8), (W, H)], fill=primary)
+
+    y = 50
+
+    # ── 채널 로고/타이틀 ──
+    draw.text((50, y), "US MARKET FLASH", font=_font(32, bold=True), fill=accent)
+    ts = datetime.now().strftime("%Y.%m.%d %H:%M")
+    draw.text((W - 250, y + 5), ts, font=_font(26), fill=TEXT_GRAY)
+    y += 80
+
+    # ── 종목 블록 ──
+    if tickers:
+        for i, ticker in enumerate(tickers[:2]):  # 최대 2개
+            # 티커 배경 박스
+            ticker_text = f"${ticker}"
+            _draw_rounded_rect(draw, (50, y, 280, y + 70), 10, (30, 30, 45))
+            draw.text((70, y + 12), ticker_text, font=_font(42, bold=True), fill=primary)
+
+            # 회사명
+            en_name = companies_en[i] if i < len(companies_en) else ""
+            if en_name:
+                draw.text((300, y + 20), en_name[:25], font=_font(30), fill=TEXT_WHITE)
+            y += 85
+    else:
+        _draw_rounded_rect(draw, (50, y, 350, y + 70), 10, (30, 30, 45))
+        draw.text((70, y + 12), "US MARKET", font=_font(42, bold=True), fill=primary)
+        y += 85
+
+    # ── 영향 배지 ──
+    y += 10
+    impact_text = {"긍정": "📈 긍정적 전망", "부정": "📉 부정적 전망", "중립": "➖ 중립 전망"}.get(impact, "➖ 중립")
+    _draw_rounded_rect(draw, (50, y, 320, y + 55), 8, badge_color)
+    draw.text((75, y + 10), impact_text, font=_font(32, bold=True), fill=TEXT_WHITE)
+    y += 90
+
+    # ── 구분선 ──
+    draw.line([(50, y), (W - 50, y)], fill=(60, 60, 80), width=2)
+    y += 30
+
+    # ── 헤드라인 ──
+    headline_lines = textwrap.wrap(headline_kr, width=17)[:4]
+    for line in headline_lines:
+        draw.text((50, y), line, font=_font(52, bold=True), fill=TEXT_WHITE)
+        y += 70
+    y += 20
+
+    # ── 구분선 ──
+    draw.line([(50, y), (W - 50, y)], fill=(60, 60, 80), width=2)
+    y += 30
+
+    # ── 차트 영역 ──
+    if chart_frame:
+        chart_y = y
+        img.paste(chart_frame, (0, chart_y), chart_frame)
+        y += H_CHART + 20
+
+    # ── 핵심 포인트 ──
+    if summary:
+        draw.text((50, y), "핵심 포인트", font=_font(28, bold=True), fill=accent)
+        y += 45
+
+        # 요약을 줄로 나누기
+        summary_lines = textwrap.wrap(summary, width=28)[:4]
+        for i, line in enumerate(summary_lines):
+            bullet = "•"
+            draw.text((50, y), bullet, font=_font(28), fill=primary)
+            draw.text((80, y), line, font=_font(28), fill=TEXT_GRAY)
+            y += 42
+
+    # ── 워터마크 ──
+    draw.text((50, H - 55), "US Market Flash  |  실시간 미국 주식 뉴스",
+              font=_font(24), fill=(80, 80, 100))
+
+    return img
+
+
+def _draw_subtitle(img: Image.Image, text: str, impact: str) -> Image.Image:
+    """현재 문장을 하단 자막으로 렌더링"""
     if not text:
         return img
 
-    lines = textwrap.wrap(text, width=21)[:3]
+    colors = COLORS.get(impact, COLORS["중립"])
+    primary = colors["primary"]
+
+    lines = textwrap.wrap(text, width=22)[:3]
     if not lines:
         return img
 
-    font    = _font(46, bold=True)
-    line_h  = 62
-    pad     = 20
-    ph      = len(lines) * line_h + pad * 2
-    y_start = H - ph - 58  # 워터마크 위
+    font = _font(44, bold=True)
+    line_h = 58
+    pad = 24
+    ph = len(lines) * line_h + pad * 2
+    y_start = H - ph - 75
 
-    # 반투명 배경
-    panel = Image.new("RGBA", (W, ph), SUBTITLE_BG)
-    img.paste(panel, (0, y_start), panel)
+    # 자막 배경 (반투명 + 테두리)
+    overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    overlay_draw = ImageDraw.Draw(overlay)
+
+    # 배경 박스
+    _draw_rounded_rect(overlay_draw, (30, y_start, W - 30, y_start + ph), 15, (15, 15, 25, 230))
+
+    # 왼쪽 강조 바
+    overlay_draw.rectangle([(30, y_start), (38, y_start + ph)], fill=primary + (255,))
+
+    img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
 
     draw = ImageDraw.Draw(img)
     y = y_start + pad
     for line in lines:
-        # 외곽선 (가독성)
-        for dx, dy in [(-2, 0), (2, 0), (0, -2), (0, 2)]:
-            draw.text((44 + dx, y + dy), line, font=font, fill=(0, 0, 0))
-        draw.text((44, y), line, font=font, fill=TEXT_COLOR)
+        # 텍스트 그림자
+        draw.text((62, y + 2), line, font=font, fill=(0, 0, 0))
+        draw.text((60, y), line, font=font, fill=TEXT_WHITE)
         y += line_h
 
     return img
-
-
-def _chart_y_offset(tickers: list) -> int:
-    ticker_count   = len(tickers[:3]) if tickers else 1
-    opinion_height = 8 + 110 if tickers else 0
-    return 30 + ticker_count * 90 + opinion_height
 
 
 # ──────────────────────────── 영상 생성 ────────────────────────────
@@ -304,11 +394,11 @@ def create_video(headline_kr: str, analysis: dict,
     os.makedirs(VIDEO_OUTPUT_DIR, exist_ok=True)
     os.makedirs(ASSETS_DIR, exist_ok=True)
 
-    companies    = analysis.get("companies", [])
+    companies = analysis.get("companies", [])
     companies_en = analysis.get("companies_en", [])
-    impact       = analysis.get("impact", "중립")
-    reason       = analysis.get("reason", "")
-    tickers      = analysis.get("tickers", [])
+    impact = analysis.get("impact", "중립")
+    summary = analysis.get("summary", "")
+    tickers = analysis.get("tickers", [])
 
     # 나레이션 스크립트 준비
     raw_script = analysis.get("narration") or analysis.get("script", headline_kr)
@@ -319,47 +409,24 @@ def create_video(headline_kr: str, analysis: dict,
         if ko and en:
             raw_script = raw_script.replace(ko, en)
 
-    # 종목 관련 뉴스: 마지막에 분석 요약 추가
-    if tickers:
-        ticker_label = ", ".join(companies_en[:3]) if companies_en else ", ".join(tickers[:3])
-        impact_word  = {"긍정": "긍정적", "부정": "부정적", "중립": "중립적"}.get(impact, impact)
-        reason_clean = _clean_script(reason)
-        summary_line = f"종목 분석. {ticker_label}은 이번 뉴스로 {impact_word} 영향이 예상됩니다. {reason_clean}"
-        script = raw_script.rstrip() + " " + summary_line
-    else:
-        script = raw_script
-
-    # 이미지가 없으면 웹 검색
-    if not image_url:
-        if companies_en:
-            query = f"{companies_en[0]} stock market finance"
-        elif tickers:
-            query = f"{tickers[0]} stock market"
-        else:
-            query = "US stock market finance news"
-        print(f"  [>>] 이미지 없음, 웹 검색 중: {query}")
-        image_url = _fetch_web_image(query)
-        if image_url:
-            print(f"  [OK] 웹 이미지 획득")
-        else:
-            print(f"  [--] 웹 이미지 없음, 다크 배경 사용")
+    script = raw_script
 
     # 1. 문장별 TTS 생성 + 자막 타이밍
     audio_path = os.path.join(ASSETS_DIR, "tts_temp.mp3")
     print(f"  [>>] TTS 생성 중 ({len(_split_sentences(script))}문장)...")
-    timings  = _make_audio_with_timing(script, audio_path)
+    timings = _make_audio_with_timing(script, audio_path)
     duration = (timings[-1][2] + 0.5) if timings else 10.0
     print(f"  [OK] TTS 완료: {len(timings)}문장, {duration:.1f}초")
 
-    # 2. 배경
-    bg = _load_background(image_url)
+    # 2. 그라데이션 배경 생성
+    bg = _create_gradient_background(impact)
+    print(f"  [OK] 보고서 배경 생성 ({impact})")
 
-    # 3. 차트 프레임 생성 (영상 전체 길이)
-    FPS          = 30
+    # 3. 차트 프레임 생성
+    FPS = 30
     total_frames = int(duration * FPS)
-    bar_color    = IMPACT_COLORS.get(impact, IMPACT_COLORS["중립"])
+    bar_color = COLORS.get(impact, COLORS["중립"])["primary"]
     chart_frames = generate_chart_frames(tickers, total_frames, bar_color, W_CHART, H_CHART)
-    chart_y      = _chart_y_offset(tickers)
 
     frames_dir = os.path.join(ASSETS_DIR, "frames")
     os.makedirs(frames_dir, exist_ok=True)
@@ -377,20 +444,23 @@ def create_video(headline_kr: str, analysis: dict,
 
         chart_idx = min(fi, len(chart_frames) - 1)
         frame = bg.copy()
-        if chart_frames[chart_idx]:
-            frame.paste(chart_frames[chart_idx], (0, chart_y), chart_frames[chart_idx])
 
-        frame = _draw_text_overlays(frame, tickers, companies, companies_en,
-                                    impact, headline_kr)
-        frame = _draw_subtitle(frame, subtitle)
+        # 보고서 레이아웃 렌더링
+        frame = _draw_report_layout(
+            frame, tickers, companies_en, impact, headline_kr, summary,
+            chart_frame=chart_frames[chart_idx]
+        )
+
+        # 자막 렌더링
+        frame = _draw_subtitle(frame, subtitle, impact)
 
         path = os.path.join(frames_dir, f"frame_{fi:05d}.png")
         frame.save(path)
         frame_paths.append(path)
 
     # 4. ffmpeg: 프레임 + 음성 합성
-    ticker_str  = "_".join(tickers) if tickers else "market"
-    timestamp   = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ticker_str = "_".join(tickers) if tickers else "market"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = os.path.join(VIDEO_OUTPUT_DIR, f"{ticker_str}_{timestamp}.mp4")
 
     cmd = [

@@ -70,32 +70,28 @@ def analyze_article(headline: str, summary: str, body: str = "") -> dict:
     return result
 
 
-_NARRATION_PART1 = """당신은 한국 주식·경제 유튜브 채널 전문 나레이터입니다.
-아래 뉴스를 바탕으로 나레이션 스크립트 전반부(1·2단락)를 작성하세요.
+_NARRATION_SHORTS = """당신은 한국 주식·경제 유튜브 Shorts 전문 나레이터입니다.
+아래 뉴스를 바탕으로 60초 분량의 나레이션을 작성하세요.
 
 [뉴스 제목] {headline}
 [뉴스 요약] {summary}
 [기사 본문] {body}
-[종목] {tickers} / [영향] {impact}
+[종목] {tickers} / [영향] {impact} / [이유] {reason}
 
-단락1(기, 700자 이상): 이 뉴스의 배경과 현황 소개. 왜 이 뉴스가 중요한지, 관련 산업 흐름, 기업 배경, 시장 상황 포함.
-단락2(승, 700자 이상): 핵심 사건과 세부 내용 전개. 구체적 수치, 발언, 관련 인물·기업·기관 반응 포함.
+규칙:
+1. 반드시 280~320자로 작성 (너무 짧으면 안 됨!)
+2. 구성:
+   - 후킹 (1문장): 시청자 관심을 끄는 강렬한 도입
+   - 핵심 내용 (3~4문장): 무슨 일이 있었는지, 구체적 수치/사실 포함
+   - 시장 영향 (1~2문장): 왜 중요한지, 어떤 영향이 있는지
+   - 투자자 시사점 (1문장): 투자자가 주목할 포인트
+3. 한국어 구어체, 뉴스 앵커처럼 또박또박
+4. 회사명은 한국어로 (엔비디아, 테슬라, 애플 등)
+5. 나레이션 텍스트만 출력
 
-규칙: 한국어 구어체만 사용. 단락 번호나 태그 없이 자연스럽게 연결. 나레이션 텍스트만 출력."""
-
-_NARRATION_PART2 = """당신은 한국 주식·경제 유튜브 채널 전문 나레이터입니다.
-아래는 유튜브 나레이션 전반부입니다. 이어서 후반부(3·4단락)를 작성하세요.
-
-[전반부]
-{part1}
-
-[뉴스 정보]
-종목: {tickers} / 영향: {impact} / 이유: {reason}
-
-단락3(전, 700자 이상): 시장·경제적 영향 분석. 단기·장기 영향, 경쟁사 비교, 전문가·애널리스트 시각, 관련 데이터 포함.
-단락4(결, 700자 이상): 투자자 관점 결론·전망. 매수·매도 관점, 리스크 요인, 주목할 지표, 향후 이벤트 포함.
-
-규칙: 한국어 구어체만 사용. 단락 번호나 태그 없이 전반부와 자연스럽게 이어지도록. 후반부 텍스트만 출력."""
+예시 (약 300자):
+"엔비디아가 또 한 번 월가를 놀라게 했습니다. 2분기 매출이 300억 달러를 돌파하며 시장 예상치를 20% 이상 상회했는데요. 전년 동기 대비 무려 122% 증가한 수치입니다. AI 반도체 수요가 여전히 폭발적이라는 걸 다시 한번 증명한 셈이죠. 데이터센터 매출만 263억 달러로, 전체의 87%를 차지했습니다. 다만 주가가 이미 많이 오른 만큼 밸류에이션 부담은 커졌습니다. 단기 변동성에 유의하면서 AI 투자 흐름을 지켜보시기 바랍니다."
+"""
 
 
 def _call_groq(prompt: str, temperature: float = 0.7) -> str:
@@ -121,29 +117,20 @@ def _call_groq(prompt: str, temperature: float = 0.7) -> str:
 
 
 def generate_narration(headline: str, summary: str, body: str, analysis: dict) -> str:
-    """기승전결 구조의 3000자 나레이션을 2번 Groq 호출로 생성합니다."""
+    """60초 Shorts용 300~350자 나레이션을 1회 Groq 호출로 생성합니다."""
     tickers_str = ", ".join(analysis.get("tickers", [])) or "시장 전반"
     impact = analysis.get("impact", "중립")
     reason = analysis.get("reason", "")
 
-    # 1차 호출: 기·승 단락
-    part1 = _call_groq(_NARRATION_PART1.format(
+    narration = _call_groq(_NARRATION_SHORTS.format(
         headline=headline,
         summary=summary or headline,
-        body=body[:3000] if body else "본문 없음",
-        tickers=tickers_str,
-        impact=impact,
-    ))
-
-    # 2차 호출: 전·결 단락
-    part2 = _call_groq(_NARRATION_PART2.format(
-        part1=part1[:800],  # 전반부 요약만 전달 (토큰 절약)
+        body=body[:2000] if body else "본문 없음",
         tickers=tickers_str,
         impact=impact,
         reason=reason,
     ))
 
-    narration = (part1 + "\n\n" + part2).strip()
     if not narration:
         narration = analysis.get("summary", headline)
     return narration

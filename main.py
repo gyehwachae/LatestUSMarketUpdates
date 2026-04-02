@@ -62,7 +62,7 @@ def process_article(article: dict):
         image_url = scraped_image
         print(f"  [OK] 기사 이미지 추출: {image_url[:60]}...")
 
-    # 2. 분석 + 나레이션 생성 (Groq가 기사 본문 기반으로 3000자 기승전결 나레이션 작성)
+    # 2. 분석 (나레이션은 중요도 기준 이상일 때만 생성)
     analysis = analyze_article(headline_en, summary_en, body=body_en or "")
     score = analysis.get("importance_score", 5)
     tickers = analysis.get("tickers", [])

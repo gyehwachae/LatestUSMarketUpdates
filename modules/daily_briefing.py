@@ -10,10 +10,19 @@ from datetime import datetime, timedelta
 import yfinance as yf
 import requests
 
-from config import GROQ_API_KEY
+from config import GROQ_API_KEY, TWELVEDATA_API_KEY
 
 
-# 주요 지수 티커 (TTS용 한글 발음 포함)
+# Twelve Data용 지수 매핑 (ETF 사용 - 더 안정적)
+TWELVEDATA_INDICES = {
+    "SPY": {"name": "S&P 500", "tts_name": "에스앤피 500", "yf_ticker": "^GSPC"},
+    "QQQ": {"name": "나스닥", "tts_name": "나스닥", "yf_ticker": "^IXIC"},
+    "DIA": {"name": "다우존스", "tts_name": "다우존스", "yf_ticker": "^DJI"},
+    "IWM": {"name": "러셀 2000", "tts_name": "러셀 2000", "yf_ticker": "^RUT"},
+    "VXX": {"name": "VIX 지수", "tts_name": "빅스 지수", "yf_ticker": "^VIX"},
+}
+
+# 주요 지수 티커 (TTS용 한글 발음 포함) - yfinance fallback용
 INDICES = {
     "^GSPC": {"name": "S&P 500", "tts_name": "에스앤피 500"},
     "^IXIC": {"name": "나스닥", "tts_name": "나스닥"},
@@ -45,63 +54,221 @@ MAJOR_STOCKS = [
 ]
 
 
-def fetch_index_data() -> list[dict]:
-    """주요 지수 데이터 수집"""
+# ============ Twelve Data API 함수 ============
+
+def fetch_index_data_twelvedata() -> list[dict]:
+    """Twelve Data API로 주요 지수 데이터 수집 (배치 요청)"""
+    if not TWELVEDATA_API_KEY:
+        print("  [!!] TWELVEDATA_API_KEY 미설정")
+        return []
+
     results = []
+    symbols = ",".join(TWELVEDATA_INDICES.keys())
 
-    for ticker, info in INDICES.items():
-        try:
-            stock = yf.Ticker(ticker)
-            hist = stock.history(period="2d")
+    try:
+        url = "https://api.twelvedata.com/quote"
+        params = {
+            "symbol": symbols,
+            "apikey": TWELVEDATA_API_KEY,
+        }
+        r = requests.get(url, params=params, timeout=30)
+        r.raise_for_status()
+        data = r.json()
 
-            if len(hist) >= 2:
-                prev_close = hist["Close"].iloc[-2]
-                current = hist["Close"].iloc[-1]
-                change = current - prev_close
-                change_pct = (change / prev_close) * 100
+        for ticker, info in TWELVEDATA_INDICES.items():
+            try:
+                quote = data.get(ticker, {})
+                if quote and "percent_change" in quote:
+                    change_pct = float(quote["percent_change"])
+                    price = float(quote["close"])
+                    change = float(quote.get("change", 0))
 
-                results.append({
-                    "ticker": ticker,
-                    "name": info["name"],
-                    "tts_name": info["tts_name"],
-                    "price": current,
-                    "change": change,
-                    "change_pct": change_pct,
-                })
-        except Exception as e:
-            print(f"  [!!] 지수 데이터 실패 ({ticker}): {e}")
+                    results.append({
+                        "ticker": info["yf_ticker"],
+                        "name": info["name"],
+                        "tts_name": info["tts_name"],
+                        "price": price,
+                        "change": change,
+                        "change_pct": change_pct,
+                    })
+            except (KeyError, ValueError, TypeError) as e:
+                print(f"  [!!] 지수 파싱 실패 ({ticker}): {e}")
+                continue
+
+    except Exception as e:
+        print(f"  [!!] Twelve Data API 실패: {e}")
 
     return results
 
 
-def fetch_top_movers() -> tuple[list[dict], list[dict]]:
-    """상승/하락 TOP 5 종목 수집"""
+def fetch_top_movers_twelvedata() -> tuple[list[dict], list[dict]]:
+    """Twelve Data API로 상승/하락 종목 수집 (무료 플랜: 분당 8크레딧)"""
+    import time as time_module
+
+    if not TWELVEDATA_API_KEY:
+        print("  [!!] TWELVEDATA_API_KEY 미설정")
+        return [], []
+
+    movers = []
+    # 상위 16개 종목만 사용 (2배치 = 약 1분, 분당 8크레딧 제한)
+    stocks_to_fetch = MAJOR_STOCKS[:16]
+    batch_size = 8
+    batches = [stocks_to_fetch[i:i+batch_size] for i in range(0, len(stocks_to_fetch), batch_size)]
+
+    for idx, batch in enumerate(batches):
+        symbols = ",".join(batch)
+
+        try:
+            url = "https://api.twelvedata.com/quote"
+            params = {
+                "symbol": symbols,
+                "apikey": TWELVEDATA_API_KEY,
+            }
+            r = requests.get(url, params=params, timeout=30)
+            r.raise_for_status()
+            data = r.json()
+
+            # API 에러 체크 (Rate limit)
+            if "code" in data and data.get("code") == 429:
+                print(f"  [..] Rate limit - 61초 대기 후 재시도...")
+                time_module.sleep(61)
+                r = requests.get(url, params=params, timeout=30)
+                data = r.json()
+
+            for ticker in batch:
+                try:
+                    quote = data.get(ticker, {})
+                    if quote and "percent_change" in quote:
+                        change_pct = float(quote["percent_change"])
+                        price = float(quote["close"])
+                        tts_name = COMPANY_NAMES.get(ticker, ticker)
+
+                        movers.append({
+                            "ticker": ticker,
+                            "name": ticker,
+                            "tts_name": tts_name,
+                            "price": price,
+                            "change_pct": change_pct,
+                        })
+                except (KeyError, ValueError, TypeError):
+                    continue
+
+        except Exception as e:
+            print(f"  [!!] Twelve Data 종목 배치 실패: {e}")
+            continue
+
+        # 다음 배치 전 대기 (분당 8크레딧 제한 준수)
+        if idx < len(batches) - 1:
+            time_module.sleep(61)
+
+    # 상승/하락 정렬
+    sorted_movers = sorted(movers, key=lambda x: x["change_pct"], reverse=True)
+    top_gainers = sorted_movers[:5]
+    top_losers = sorted_movers[-5:][::-1]
+
+    return top_gainers, top_losers
+
+
+# ============ yfinance fallback 함수 ============
+
+def fetch_index_data_yfinance() -> list[dict]:
+    """yfinance로 주요 지수 데이터 수집 (fallback)"""
+    import time as time_module
+    results = []
+
+    for ticker, info in INDICES.items():
+        for attempt in range(3):  # 최대 3회 재시도
+            try:
+                stock = yf.Ticker(ticker)
+                hist = stock.history(period="2d")
+
+                if len(hist) >= 2:
+                    prev_close = hist["Close"].iloc[-2]
+                    current = hist["Close"].iloc[-1]
+                    change = current - prev_close
+                    change_pct = (change / prev_close) * 100
+
+                    results.append({
+                        "ticker": ticker,
+                        "name": info["name"],
+                        "tts_name": info["tts_name"],
+                        "price": current,
+                        "change": change,
+                        "change_pct": change_pct,
+                    })
+                break  # 성공 시 루프 탈출
+            except Exception as e:
+                if "Too Many Requests" in str(e) or "Rate" in str(e):
+                    if attempt < 2:
+                        print(f"  [..] 지수 {ticker} 재시도 ({attempt+1}/3)...")
+                        time_module.sleep(10 + attempt * 5)  # 10초, 15초, 20초 대기
+                        continue
+                print(f"  [!!] 지수 데이터 실패 ({ticker}): {e}")
+                break
+
+        time_module.sleep(3)  # 요청 간 딜레이 (3초)
+
+    return results
+
+
+def fetch_top_movers_yfinance() -> tuple[list[dict], list[dict]]:
+    """yfinance로 상승/하락 TOP 5 종목 수집 (fallback)"""
+    import time as time_module
     movers = []
 
-    for ticker in MAJOR_STOCKS:
-        try:
-            stock = yf.Ticker(ticker)
-            hist = stock.history(period="2d")
+    # 배치로 한 번에 다운로드 (Rate Limit 방지)
+    try:
+        tickers_str = " ".join(MAJOR_STOCKS)
+        data = yf.download(tickers_str, period="2d", group_by="ticker", progress=False, threads=False)
 
-            if len(hist) >= 2:
-                prev_close = hist["Close"].iloc[-2]
-                current = hist["Close"].iloc[-1]
-                change_pct = ((current - prev_close) / prev_close) * 100
+        for ticker in MAJOR_STOCKS:
+            try:
+                if ticker in data.columns.get_level_values(0):
+                    ticker_data = data[ticker]
+                    if len(ticker_data) >= 2 and not ticker_data["Close"].isna().all():
+                        prev_close = ticker_data["Close"].iloc[-2]
+                        current = ticker_data["Close"].iloc[-1]
+                        if prev_close > 0:
+                            change_pct = ((current - prev_close) / prev_close) * 100
+                            tts_name = COMPANY_NAMES.get(ticker, ticker)
 
-                info = stock.info
-                name = info.get("shortName", ticker)
-                # TTS용 한글 회사명 (없으면 영문 shortName 사용)
-                tts_name = COMPANY_NAMES.get(ticker, name[:15])
+                            movers.append({
+                                "ticker": ticker,
+                                "name": ticker,
+                                "tts_name": tts_name,
+                                "price": current,
+                                "change_pct": change_pct,
+                            })
+            except Exception:
+                continue
+    except Exception as e:
+        print(f"  [!!] 종목 배치 다운로드 실패: {e}")
+        # Fallback: 개별 다운로드
+        for ticker in MAJOR_STOCKS[:10]:  # Rate limit 방지 위해 10개만
+            for attempt in range(2):
+                try:
+                    stock = yf.Ticker(ticker)
+                    hist = stock.history(period="2d")
 
-                movers.append({
-                    "ticker": ticker,
-                    "name": name[:20],
-                    "tts_name": tts_name,
-                    "price": current,
-                    "change_pct": change_pct,
-                })
-        except Exception:
-            continue
+                    if len(hist) >= 2:
+                        prev_close = hist["Close"].iloc[-2]
+                        current = hist["Close"].iloc[-1]
+                        change_pct = ((current - prev_close) / prev_close) * 100
+                        tts_name = COMPANY_NAMES.get(ticker, ticker)
+
+                        movers.append({
+                            "ticker": ticker,
+                            "name": ticker,
+                            "tts_name": tts_name,
+                            "price": current,
+                            "change_pct": change_pct,
+                        })
+                    break
+                except Exception:
+                    if attempt == 0:
+                        time_module.sleep(10)  # 재시도 시 10초 대기
+                    continue
+            time_module.sleep(3)  # 요청 간 3초 대기
 
     # 상승/하락 정렬
     sorted_movers = sorted(movers, key=lambda x: x["change_pct"], reverse=True)
@@ -109,6 +276,36 @@ def fetch_top_movers() -> tuple[list[dict], list[dict]]:
     top_losers = sorted_movers[-5:][::-1]  # 하락폭 큰 순
 
     return top_gainers, top_losers
+
+
+# ============ 메인 함수 (Twelve Data 우선, yfinance fallback) ============
+
+def fetch_index_data() -> list[dict]:
+    """주요 지수 데이터 수집 (Twelve Data 우선, yfinance fallback)"""
+    # Twelve Data 시도
+    if TWELVEDATA_API_KEY:
+        results = fetch_index_data_twelvedata()
+        if len(results) >= 2:
+            print(f"  [OK] Twelve Data: 지수 {len(results)}개 수집")
+            return results
+        print("  [..] Twelve Data 실패, yfinance fallback...")
+
+    # yfinance fallback
+    return fetch_index_data_yfinance()
+
+
+def fetch_top_movers() -> tuple[list[dict], list[dict]]:
+    """상승/하락 TOP 5 종목 수집 (Twelve Data 우선, yfinance fallback)"""
+    # Twelve Data 시도
+    if TWELVEDATA_API_KEY:
+        gainers, losers = fetch_top_movers_twelvedata()
+        if len(gainers) >= 3 or len(losers) >= 3:
+            print(f"  [OK] Twelve Data: 상승 {len(gainers)}개, 하락 {len(losers)}개")
+            return gainers, losers
+        print("  [..] Twelve Data 실패, yfinance fallback...")
+
+    # yfinance fallback
+    return fetch_top_movers_yfinance()
 
 
 def fetch_economic_events() -> list[dict]:
@@ -196,8 +393,8 @@ def generate_briefing_script(indices: list, gainers: list, losers: list,
         company = COMPANY_NAMES.get(er["ticker"], er["ticker"])
         earning_summary += f"- {company} ({time_str})\n"
 
-    prompt = f"""당신은 한국 주식 투자자를 위한 유튜브 Shorts 나레이터입니다.
-아래 미국 증시 데이터를 바탕으로 60초 분량의 데일리 브리핑 나레이션을 작성하세요.
+    prompt = f"""당신은 한국 뉴스 앵커입니다. 미국 증시 데일리 브리핑을 전달합니다.
+아래 데이터를 바탕으로 60초 분량의 나레이션을 작성하세요.
 
 [어제 미국 증시 마감]
 {index_summary}
@@ -216,11 +413,12 @@ def generate_briefing_script(indices: list, gainers: list, losers: list,
 
 규칙:
 1. 280~320자로 작성
-2. 구성: 활기찬 인사 → 증시 핵심 요약 → 주목 종목 언급 → 마무리
-3. 활기차고 에너지 넘치는 말투! 친근하게 말하기
-4. 숫자는 핵심만 언급, 퍼센트는 소수점 한 자리까지만
-5. 마지막은 "안녕히 계세요" 대신 "그럼 내일 또 알려드릴게요!" 또는 "내일 또 만나요!"로 마무리
-6. 나레이션 텍스트만 출력
+2. 구성: 인사 → 증시 핵심 요약 → 주목 종목 → 마무리
+3. 뉴스 앵커처럼 격식체 높임말 사용 (~습니다, ~입니다, ~했습니다)
+4. 차분하고 신뢰감 있는 어조로 전달
+5. 숫자는 핵심만, 퍼센트는 소수점 한 자리까지
+6. 마무리: "내일 또 전해드리겠습니다" 또는 "좋은 하루 되십시오"
+7. 나레이션 텍스트만 출력
 """
 
     import time as time_module
@@ -251,9 +449,16 @@ def generate_briefing_script(indices: list, gainers: list, losers: list,
 
 def collect_daily_data() -> dict:
     """데일리 브리핑용 데이터 수집"""
+    import time as time_module
+
     print("  [>>] 증시 데이터 수집 중...")
     indices = fetch_index_data()
     print(f"  [OK] 지수 {len(indices)}개 수집")
+
+    # Twelve Data 분당 8크레딧 제한 - 지수(5) 후 종목(8) 요청 전 대기
+    if TWELVEDATA_API_KEY and len(indices) > 0:
+        print("  [..] API 크레딧 리셋 대기 (61초)...")
+        time_module.sleep(61)
 
     print("  [>>] 상승/하락 종목 수집 중...")
     gainers, losers = fetch_top_movers()
@@ -299,6 +504,15 @@ def create_daily_briefing() -> str | None:
     # 1. 데이터 수집
     data = collect_daily_data()
 
+    # 데이터 검증: 최소 지수 2개 또는 종목 3개 필요
+    min_indices = len(data["indices"]) >= 2
+    min_stocks = len(data["gainers"]) >= 3 or len(data["losers"]) >= 3
+    if not min_indices and not min_stocks:
+        print("  [!!] 데이터 부족 - 지수 또는 종목 데이터가 충분하지 않습니다")
+        print(f"      지수: {len(data['indices'])}개, 상승: {len(data['gainers'])}개, 하락: {len(data['losers'])}개")
+        print("  [--] 브리핑 생성 건너뜀")
+        return None
+
     # 2. 나레이션 생성
     print("  [>>] 나레이션 생성 중...")
     narration = generate_briefing_script(
@@ -306,6 +520,12 @@ def create_daily_briefing() -> str | None:
         data["events"], data["earnings"]
     )
     print(f"  [OK] 나레이션: {len(narration)}자")
+
+    # 나레이션 길이 검증 (최소 150자 필요)
+    if len(narration) < 150:
+        print("  [!!] 나레이션이 너무 짧습니다 (150자 미만)")
+        print("  [--] 브리핑 생성 건너뜀")
+        return None
 
     # 3. 영상 생성
     print("  [>>] 영상 생성 중...")

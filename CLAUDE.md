@@ -40,6 +40,7 @@ Finnhub API → article_scraper(본문추출) → translator(DeepL) → analyzer
 - `modules/video_maker.py`: edge-tts 문장별 TTS → 자막 타이밍 추출 → Pillow 프레임 렌더링 → ffmpeg 인코딩
 - `modules/chart_maker.py`: yfinance로 5일 1시간봉 → Pillow로 차트 애니메이션 프레임 생성
 - `modules/article_scraper.py`: trafilatura(1차) → BeautifulSoup(fallback)으로 기사 본문 추출
+- `modules/daily_briefing.py`: 매일 아침 증시 브리핑 생성. Twelve Data(우선) → yfinance(fallback)로 지수/종목 수집
 
 데이터 파일:
 - `data/processed_news.json`: 처리 완료된 기사 ID 목록 (중복 방지)
@@ -54,6 +55,7 @@ Finnhub API → article_scraper(본문추출) → translator(DeepL) → analyzer
 | YouTube API | 하루 10,000 유닛 (업로드 1건 ≈ 1,600유닛) | `MAX_YOUTUBE_UPLOADS_PER_DAY=6` |
 | YouTube 업로드 조건 | `importance_score` ≥ 기준값 | `YOUTUBE_MIN_IMPORTANCE=7` (기본) |
 | DeepL Free | 월 50만 자 | 헤드라인만 번역 (본문은 Groq가 직접 처리) |
+| Twelve Data | 하루 800회 (무료) | 데일리 브리핑 1회당 ~5회 사용 |
 | 뉴스 수집 | 한 번에 최대 5건 | API 쿼터 보호 |
 | 기사 본문 | 최대 4,000자 | `article_scraper.py`에서 truncate |
 
@@ -70,3 +72,7 @@ Finnhub API → article_scraper(본문추출) → translator(DeepL) → analyzer
 `.env` 필수 키: `FINNHUB_API_KEY`, `DEEPL_API_KEY`, `GROQ_API_KEY`
 YouTube: `client_secrets.json` 파일 필요 (Google Cloud Console에서 OAuth 2.0 클라이언트 생성)
 선택: `NEWS_CATEGORY` (`general` | `forex` | `crypto` | `merger`), `YOUTUBE_MIN_IMPORTANCE`
+
+### 데일리 브리핑용 (권장)
+- `TWELVEDATA_API_KEY`: 지수/종목 데이터 수집 (twelvedata.com, 무료 800회/일)
+  - 미설정 시 yfinance fallback (Rate Limit 발생 가능)

@@ -11,6 +11,9 @@ YOUTUBE_CLIENT_SECRETS_FILE = os.getenv("YOUTUBE_CLIENT_SECRETS_FILE", "client_s
 # Pexels API - pexels.com/api (무료, 월 20,000회)
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
 
+# Twelve Data API - twelvedata.com (무료, 800회/일)
+TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY")
+
 # X (Twitter) API v2 - developer.twitter.com
 X_API_KEY = os.getenv("X_API_KEY")
 X_API_SECRET = os.getenv("X_API_SECRET")

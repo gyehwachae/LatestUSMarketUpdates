@@ -7,6 +7,8 @@
 import os
 from datetime import datetime, timedelta
 
+import exchange_calendars as xcals
+import pytz
 import yfinance as yf
 import requests
 
@@ -52,6 +54,36 @@ MAJOR_STOCKS = [
     "KO", "PEP", "COST", "TMO", "AVGO", "MCD", "CSCO", "ACN", "ABT",
     "NKE", "CRM", "AMD", "INTC", "NFLX", "ADBE", "ORCL", "BA", "GE"
 ]
+
+# NYSE 캘린더 (exchange_calendars)
+_nyse_calendar = None
+
+
+def _get_nyse_calendar():
+    """NYSE 캘린더 싱글톤"""
+    global _nyse_calendar
+    if _nyse_calendar is None:
+        _nyse_calendar = xcals.get_calendar("XNYS")
+    return _nyse_calendar
+
+
+def was_us_market_open_yesterday() -> bool:
+    """어제 미국 장이 열렸는지 확인 (KST 기준 오늘 아침 → 미국 전날)"""
+    # 미국 동부 시간 기준 어제 날짜
+    et = pytz.timezone("America/New_York")
+    now_et = datetime.now(et)
+    yesterday_et = (now_et - timedelta(days=1)).date()
+
+    # exchange_calendars로 거래일 여부 확인
+    nyse = _get_nyse_calendar()
+    is_trading_day = nyse.is_session(yesterday_et)
+
+    if not is_trading_day:
+        print(f"  [--] 어제({yesterday_et})는 NYSE 휴장일")
+        return False
+
+    print(f"  [OK] 어제({yesterday_et})는 NYSE 거래일")
+    return True
 
 
 # ============ Twelve Data API 함수 ============
@@ -500,6 +532,11 @@ def create_daily_briefing() -> str | None:
     from modules.uploader import upload_video
 
     print("\n[Daily Briefing] 데일리 마켓 브리핑 생성 시작")
+
+    # 전날 미국 장이 열렸는지 확인
+    if not was_us_market_open_yesterday():
+        print("[Daily Briefing] 어제 미국 장 휴장 - 브리핑 스킵")
+        return None
 
     # 1. 데이터 수집
     data = collect_daily_data()

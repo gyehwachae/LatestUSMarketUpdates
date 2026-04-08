@@ -14,6 +14,9 @@ PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
 # Twelve Data API - twelvedata.com (무료, 800회/일)
 TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY")
 
+# Financial Modeling Prep API - financialmodelingprep.com (무료, 250회/일)
+FMP_API_KEY = os.getenv("FMP_API_KEY")
+
 # X (Twitter) API v2 - developer.twitter.com
 X_API_KEY = os.getenv("X_API_KEY")
 X_API_SECRET = os.getenv("X_API_SECRET")

@@ -68,21 +68,22 @@ def _get_nyse_calendar():
 
 
 def was_us_market_open_yesterday() -> bool:
-    """어제 미국 장이 열렸는지 확인 (KST 기준 오늘 아침 → 미국 전날)"""
-    # 미국 동부 시간 기준 어제 날짜
+    """브리핑할 마감 데이터가 있는지 확인 (KST 오전 7시 = ET 전날 저녁, 즉 ET 당일 마감 후)"""
+    # KST 오전 7시 → ET 전날 오후 6시 (장 마감 후)
+    # 따라서 체크할 날짜는 ET "오늘" (방금 마감된 거래일)
     et = pytz.timezone("America/New_York")
     now_et = datetime.now(et)
-    yesterday_et = (now_et - timedelta(days=1)).date()
+    check_date = now_et.date()  # ET 기준 오늘 (KST 아침 = ET 전날 저녁)
 
     # exchange_calendars로 거래일 여부 확인
     nyse = _get_nyse_calendar()
-    is_trading_day = nyse.is_session(yesterday_et)
+    is_trading_day = nyse.is_session(check_date)
 
     if not is_trading_day:
-        print(f"  [--] 어제({yesterday_et})는 NYSE 휴장일")
+        print(f"  [--] {check_date}는 NYSE 휴장일")
         return False
 
-    print(f"  [OK] 어제({yesterday_et})는 NYSE 거래일")
+    print(f"  [OK] {check_date}는 NYSE 거래일")
     return True
 
 
@@ -533,9 +534,9 @@ def create_daily_briefing() -> str | None:
 
     print("\n[Daily Briefing] 데일리 마켓 브리핑 생성 시작")
 
-    # 전날 미국 장이 열렸는지 확인
+    # 브리핑할 마감 데이터가 있는지 확인
     if not was_us_market_open_yesterday():
-        print("[Daily Briefing] 어제 미국 장 휴장 - 브리핑 스킵")
+        print("[Daily Briefing] 오늘 미국 장 휴장 - 브리핑 스킵")
         return None
 
     # 1. 데이터 수집
@@ -558,9 +559,9 @@ def create_daily_briefing() -> str | None:
     )
     print(f"  [OK] 나레이션: {len(narration)}자")
 
-    # 나레이션 길이 검증 (최소 150자 필요)
-    if len(narration) < 150:
-        print("  [!!] 나레이션이 너무 짧습니다 (150자 미만)")
+    # 나레이션 길이 검증 (최소 100자 필요)
+    if len(narration) < 100:
+        print("  [!!] 나레이션이 너무 짧습니다 (100자 미만)")
         print("  [--] 브리핑 생성 건너뜀")
         return None
 

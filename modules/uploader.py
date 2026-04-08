@@ -50,7 +50,13 @@ def _get_credentials() -> Credentials:
         else:
             try:
                 flow = InstalledAppFlow.from_client_secrets_file(YOUTUBE_CLIENT_SECRETS_FILE, SCOPES)
-                creds = flow.run_console()
+                # Headless 환경용 수동 인증
+                flow.redirect_uri = "urn:ietf:wg:oauth:2.0:oob"
+                auth_url, _ = flow.authorization_url(prompt="consent")
+                print(f"\n[Uploader] 브라우저에서 다음 URL을 열어 인증하세요:\n{auth_url}\n")
+                code = input("인증 코드를 입력하세요: ").strip()
+                flow.fetch_token(code=code)
+                creds = flow.credentials
             except Exception as e:
                 print(f"[Uploader] 인증 실패 (OAuth): {e}")
                 return None
